@@ -506,6 +506,7 @@ if (fs.existsSync(webDist)) {
   app.use(express.static(webDist, { maxAge: '1h', index: false }))
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next()
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
     res.sendFile(path.join(webDist, 'index.html'))
   })
 } else {

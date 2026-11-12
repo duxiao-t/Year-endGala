@@ -111,7 +111,8 @@ try {
   await enableMotion.waitFor({ state: 'visible', timeout: 5000 })
   await enableMotion.click()
   await join.evaluate(async () => {
-    for (let index = 0; index < 8; index += 1) {
+    const startedAt = performance.now()
+    for (let index = 0; performance.now() - startedAt < 1200; index += 1) {
       const event = new Event('devicemotion')
       Object.defineProperty(event, 'acceleration', {
         value: { x: 0, y: 0, z: 0 }
@@ -120,7 +121,7 @@ try {
         value: { x: index % 2 === 0 ? 9 : -9, y: 0, z: 9.8 }
       })
       window.dispatchEvent(event)
-      await new Promise((resolve) => setTimeout(resolve, 60))
+      await new Promise((resolve) => setTimeout(resolve, 16))
     }
   })
   await join.waitForTimeout(1800)

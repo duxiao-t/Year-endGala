@@ -24,11 +24,18 @@ const rank = ref<number | null>(props.summary.shake.rank)
 const lastBatch = ref(0)
 const pulse = ref(false)
 const SENSOR_TIMEOUT_MS = 2500
-let lastTime = 0
-let lastX = 0
-let lastY = 0
-let lastZ = 0
+const SAMPLE_INTERVAL_MS = 50
+const SAMPLE_DELTA = 4
+let latestX = 0
+let latestY = 0
+let latestZ = 0
+let latestHasData = false
+let sampleX = 0
+let sampleY = 0
+let sampleZ = 0
+let sampleHasData = false
 let sendTimer: number | undefined
+let sampleTimer: number | undefined
 let sensorWatchdog: number | undefined
 let motionHandler: ((event: DeviceMotionEvent) => void) | undefined
 let tapCooldown = 0
@@ -59,6 +66,7 @@ watch(
     sensorEventCount.value = 0
     permissionError.value = ''
     tapMode.value = false
+    lastBatch.value = 0
     stop()
   }
 )
@@ -108,36 +116,20 @@ async function enableSensor() {
       const acceleration = hasGravity ? gravity : hasLinear ? linear : null
       if (!acceleration) return
       sensorSource.value = hasGravity ? 'gravity' : 'linear'
-      const now = performance.now()
+      latestX = acceleration.x || 0
+      latestY = acceleration.y || 0
+      latestZ = acceleration.z || 0
+      latestHasData = true
       if (!sensorHasData.value) {
         sensorHasData.value = true
         clearSensorWatchdog()
-        lastX = acceleration.x || 0
-        lastY = acceleration.y || 0
-        lastZ = acceleration.z || 0
-        lastTime = now
-        return
-      }
-      const delta =
-        Math.abs((acceleration.x || 0) - lastX) +
-        Math.abs((acceleration.y || 0) - lastY) +
-        Math.abs((acceleration.z || 0) - lastZ)
-      const elapsed = now - lastTime
-      lastX = acceleration.x || 0
-      lastY = acceleration.y || 0
-      lastZ = acceleration.z || 0
-      lastTime = now
-      if (elapsed > 30 && delta > (hasGravity ? 7 : 3.5)) {
-        lastBatch.value = Math.min(8, lastBatch.value + 1)
-        localCount.value += 1
-        pulse.value = true
-        window.setTimeout(() => (pulse.value = false), 120)
       }
     }
     window.addEventListener('devicemotion', motionHandler, { passive: true })
     enabled.value = true
     requesting.value = false
     startSender()
+    startSampling()
     armSensorWatchdog()
   } catch {
     useTapMode('无法读取运动传感器，已切换为点击模式')
@@ -170,9 +162,45 @@ function removeMotionHandler() {
   }
 }
 
+function startSampling() {
+  stopSampling()
+  sampleTimer = window.setInterval(() => {
+    if (phase.value !== 'running' || !latestHasData) return
+    if (!sampleHasData) {
+      sampleX = latestX
+      sampleY = latestY
+      sampleZ = latestZ
+      sampleHasData = true
+      return
+    }
+    const delta =
+      Math.abs(latestX - sampleX) +
+      Math.abs(latestY - sampleY) +
+      Math.abs(latestZ - sampleZ)
+    sampleX = latestX
+    sampleY = latestY
+    sampleZ = latestZ
+    if (delta <= SAMPLE_DELTA) return
+    lastBatch.value = Math.min(8, lastBatch.value + 1)
+    localCount.value += 1
+    pulse.value = true
+    window.setTimeout(() => (pulse.value = false), 120)
+  }, SAMPLE_INTERVAL_MS)
+}
+
+function stopSampling() {
+  if (sampleTimer) {
+    window.clearInterval(sampleTimer)
+    sampleTimer = undefined
+  }
+  sampleHasData = false
+  latestHasData = false
+}
+
 function useTapMode(reason: string) {
   clearSensorWatchdog()
   removeMotionHandler()
+  stopSampling()
   enabled.value = false
   requesting.value = false
   tapMode.value = true
@@ -227,6 +255,7 @@ function stop() {
     sendTimer = undefined
   }
   removeMotionHandler()
+  stopSampling()
   enabled.value = false
   requesting.value = false
 }
