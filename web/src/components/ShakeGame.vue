@@ -15,6 +15,8 @@ const enabled = ref(false)
 const tapMode = ref(false)
 const requesting = ref(false)
 const sensorHasData = ref(false)
+const sensorSource = ref<'gravity' | 'linear' | ''>('')
+const sensorEventCount = ref(0)
 const localCount = ref(0)
 const permissionError = ref('')
 const score = ref(props.summary.shake.score)
@@ -53,6 +55,8 @@ watch(
     rank.value = props.summary.shake.rank
     localCount.value = 0
     sensorHasData.value = false
+    sensorSource.value = ''
+    sensorEventCount.value = 0
     permissionError.value = ''
     tapMode.value = false
     stop()
@@ -94,14 +98,16 @@ async function enableSensor() {
       return
     }
     motionHandler = (event: DeviceMotionEvent) => {
+      sensorEventCount.value += 1
       const linear = event.acceleration
       const gravity = event.accelerationIncludingGravity
-      const usingLinear =
-        Boolean(linear) &&
-        [linear?.x, linear?.y, linear?.z].some((value) => value !== null && value !== undefined)
-      const acceleration = usingLinear ? linear : gravity
-      const values = [acceleration?.x, acceleration?.y, acceleration?.z]
-      if (!acceleration || !values.some((value) => value !== null && value !== undefined)) return
+      const gravityValues = [gravity?.x, gravity?.y, gravity?.z]
+      const linearValues = [linear?.x, linear?.y, linear?.z]
+      const hasGravity = gravityValues.some((value) => value !== null && value !== undefined)
+      const hasLinear = linearValues.some((value) => value !== null && value !== undefined)
+      const acceleration = hasGravity ? gravity : hasLinear ? linear : null
+      if (!acceleration) return
+      sensorSource.value = hasGravity ? 'gravity' : 'linear'
       const now = performance.now()
       if (!sensorHasData.value) {
         sensorHasData.value = true
@@ -121,7 +127,7 @@ async function enableSensor() {
       lastY = acceleration.y || 0
       lastZ = acceleration.z || 0
       lastTime = now
-      if (elapsed > 30 && delta > (usingLinear ? 3.5 : 10)) {
+      if (elapsed > 30 && delta > (hasGravity ? 7 : 3.5)) {
         lastBatch.value = Math.min(8, lastBatch.value + 1)
         localCount.value += 1
         pulse.value = true
@@ -142,7 +148,10 @@ function armSensorWatchdog() {
   clearSensorWatchdog()
   sensorWatchdog = window.setTimeout(() => {
     if (phase.value === 'running' && !tapMode.value && !sensorHasData.value) {
-      useTapMode('未收到传感器数据，已切换为点击模式')
+      const hint = /Android/i.test(navigator.userAgent)
+        ? '请确认使用 Chrome 并允许运动传感器；'
+        : ''
+      useTapMode(`${hint}未收到传感器数据，已切换为点击模式`)
     }
   }, SENSOR_TIMEOUT_MS)
 }
@@ -176,6 +185,8 @@ function retrySensor() {
   tapMode.value = false
   permissionError.value = ''
   sensorHasData.value = false
+  sensorSource.value = ''
+  sensorEventCount.value = 0
   void enableSensor()
 }
 
@@ -265,8 +276,9 @@ onBeforeUnmount(stop)
         </div>
         <div v-if="enabled" class="grid" style="margin-top: 18px">
           <p class="small" data-testid="sensor-status" style="color: var(--teal); margin: 0">
-            {{ sensorHasData ? '传感器已连接，摇动手机' : '正在等待传感器数据…' }} · 已捕获
-            {{ localCount }} 次
+            {{ sensorHasData ? '传感器已连接，摇动手机' : '正在等待传感器数据…' }} ·
+            {{ sensorSource === 'gravity' ? '重力向量' : sensorSource === 'linear' ? '线性加速度' : '尚无数据' }}
+            · 已捕获 {{ localCount }} 次 · 事件 {{ sensorEventCount }}
           </p>
           <button class="btn btn-sm btn-ghost" @click="useTapMode('已切换到点击模式')">
             摇动没反应？改用点击

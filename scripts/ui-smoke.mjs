@@ -106,6 +106,42 @@ try {
   await join.screenshot({ path: `${outputDir}/play-shake-fallback.png`, fullPage: true })
   await adminAction('shake', 'finish')
 
+  await adminAction('shake', 'start')
+  const enableMotion = join.getByRole('button', { name: '开启运动权限' })
+  await enableMotion.waitFor({ state: 'visible', timeout: 5000 })
+  await enableMotion.click()
+  await join.evaluate(async () => {
+    for (let index = 0; index < 8; index += 1) {
+      const event = new Event('devicemotion')
+      Object.defineProperty(event, 'acceleration', {
+        value: { x: 0, y: 0, z: 0 }
+      })
+      Object.defineProperty(event, 'accelerationIncludingGravity', {
+        value: { x: index % 2 === 0 ? 9 : -9, y: 0, z: 9.8 }
+      })
+      window.dispatchEvent(event)
+      await new Promise((resolve) => setTimeout(resolve, 60))
+    }
+  })
+  await join.waitForTimeout(1800)
+  const sensorStatus = await join.getByTestId('sensor-status').textContent()
+  const sensorScore = await join.evaluate(async () => {
+    const response = await fetch('/api/me')
+    const summary = await response.json()
+    return summary.shake.score
+  })
+  const capturedCount = Number(/已捕获 (\d+) 次/.exec(sensorStatus || '')?.[1] || 0)
+  if (
+    !/传感器已连接/.test(sensorStatus || '') ||
+    !/重力向量/.test(sensorStatus || '') ||
+    capturedCount <= 0 ||
+    sensorScore <= 0
+  ) {
+    throw new Error(`shake sensor path failed: ${sensorStatus}; score=${sensorScore}`)
+  }
+  await join.screenshot({ path: `${outputDir}/play-shake-sensor.png`, fullPage: true })
+  await adminAction('shake', 'finish')
+
   await adminAction('redpacket', 'start')
   await captureCurrent(screen, 'screen-redpacket')
   await captureCurrent(join, 'play-redpacket')
