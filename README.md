@@ -36,6 +36,22 @@ docker compose up -d --build
 
 `Caddyfile` 使用 `DOMAIN` 自动申请 HTTPS 证书，并反向代理到 Node 服务。会场大屏与手机使用同一个 `PUBLIC_ORIGIN`，二维码会自动带上入场码。
 
+### 花生壳回源（本机预览）
+
+花生壳负责公网 HTTPS 终止，本地 Caddy 只监听 HTTP `8443`，再代理到当前应用 `3101`。示例配置见 `deploy/caddy/Caddyfile.oray`：
+
+```bash
+docker run -d --name year-end-gala-proxy --restart unless-stopped \
+  -p 8443:8443 \
+  --add-host=host.docker.internal:host-gateway \
+  -v "$PWD/deploy/caddy/Caddyfile.oray:/etc/caddy/Caddyfile:ro" \
+  caddy:2.8-alpine
+```
+
+应用容器必须设置 `PUBLIC_ORIGIN=https://796s643n57.goho.co`，花生壳映射保持公网 `443` 到本机 `8443`。`8443` 必须是 HTTP 回源，不要再启动本地 TLS 证书；公网证书由花生壳提供。
+
+回滚时停止 `year-end-gala-proxy`，恢复原先占用 `8443` 的服务，并把应用容器的 `PUBLIC_ORIGIN` 改回原值后重建。
+
 ## 主持台操作
 
 1. 在“参与者”中导入 Excel/CSV（工号、姓名、部门），或开放扫码自助登记。
@@ -79,6 +95,8 @@ Socket.IO 使用 `/live` 默认命名空间：玩家发送 `shake:batch`、`pack
 3. 用 20–50 台真机做彩排，覆盖 iOS Safari 与 Android Chrome，实际摇动、滑动和答题。
 4. 活动前导出一次名单并备份 `data/gala.db`；活动中不要修改正在进行的红包预算。
 5. 现场 Wi-Fi、AP 数量和公网出口不是应用能修复的部分，需单独验收。
+
+摇一摇页面会检测 HTTPS、设备运动权限和实际传感器事件。授权后 2.5 秒仍收不到事件会自动切换点击模式，并保留“重新检测摇动”入口，避免手机端无反馈。
 
 红包和答题可通过隔离数据库做公网并发验收：
 

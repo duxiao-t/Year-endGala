@@ -37,6 +37,17 @@ try {
   await capture(landing, 'landing', '/')
 
   const join = await browser.newPage({ viewport: { width: 430, height: 932 } })
+  await join.addInitScript(() => {
+    class StubDeviceMotionEvent extends Event {
+      static requestPermission() {
+        return Promise.resolve('granted')
+      }
+    }
+    Object.defineProperty(window, 'DeviceMotionEvent', {
+      configurable: true,
+      value: StubDeviceMotionEvent
+    })
+  })
   const joinPath = process.env.JOIN_CODE
     ? `/join?code=${encodeURIComponent(process.env.JOIN_CODE)}`
     : '/join'
@@ -83,6 +94,16 @@ try {
   await adminAction('shake', 'start')
   await captureCurrent(screen, 'screen-shake')
   await captureCurrent(join, 'play-shake')
+  await join.getByRole('button', { name: '开启运动权限' }).click()
+  const tapButton = join.getByTestId('tap-button')
+  await tapButton.waitFor({ state: 'visible', timeout: 5000 })
+  await tapButton.click()
+  await join.waitForTimeout(1300)
+  const tapCount = await join.getByTestId('tap-count').textContent()
+  if (!/[1-9]\d* 次/.test(tapCount || '')) {
+    throw new Error(`shake fallback did not record a tap: ${tapCount}`)
+  }
+  await join.screenshot({ path: `${outputDir}/play-shake-fallback.png`, fullPage: true })
   await adminAction('shake', 'finish')
 
   await adminAction('redpacket', 'start')

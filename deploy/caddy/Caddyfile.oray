@@ -1,0 +1,13 @@
+{
+    auto_https off
+}
+
+http://:8443 {
+    encode zstd gzip
+
+    reverse_proxy host.docker.internal:3101 {
+        header_up Host {host}
+        header_up X-Forwarded-Proto https
+        header_up X-Real-IP {remote_host}
+    }
+}

@@ -13,16 +13,21 @@ const phase = computed(() => props.snapshot.shake.phase)
 const remaining = useCountdown(() => props.snapshot.shake.endsAt)
 const enabled = ref(false)
 const tapMode = ref(false)
+const requesting = ref(false)
+const sensorHasData = ref(false)
+const localCount = ref(0)
 const permissionError = ref('')
 const score = ref(props.summary.shake.score)
 const rank = ref<number | null>(props.summary.shake.rank)
 const lastBatch = ref(0)
 const pulse = ref(false)
+const SENSOR_TIMEOUT_MS = 2500
 let lastTime = 0
 let lastX = 0
 let lastY = 0
 let lastZ = 0
 let sendTimer: number | undefined
+let sensorWatchdog: number | undefined
 let motionHandler: ((event: DeviceMotionEvent) => void) | undefined
 let tapCooldown = 0
 
@@ -46,7 +51,11 @@ watch(
   () => {
     score.value = props.summary.shake.score
     rank.value = props.summary.shake.rank
-    if (phase.value !== 'running') stop()
+    localCount.value = 0
+    sensorHasData.value = false
+    permissionError.value = ''
+    tapMode.value = false
+    stop()
   }
 )
 
@@ -59,28 +68,50 @@ watch(
 
 async function enableSensor() {
   permissionError.value = ''
-  if (phase.value !== 'running') return
+  if (phase.value !== 'running' || requesting.value) return
+  requesting.value = true
   try {
+    if (!window.isSecureContext) {
+      useTapMode('运动传感器需要 HTTPS，已切换为点击模式')
+      return
+    }
+    if (!('DeviceMotionEvent' in window)) {
+      useTapMode('当前设备未提供运动传感器，已切换为点击模式')
+      return
+    }
     const DeviceMotion = window.DeviceMotionEvent as unknown as {
       requestPermission?: () => Promise<'granted' | 'denied'>
     }
     if (typeof DeviceMotion?.requestPermission === 'function') {
       const result = await DeviceMotion.requestPermission()
       if (result !== 'granted') {
-        permissionError.value = '运动权限未开启，请允许后重试'
-        tapMode.value = true
+        useTapMode('运动权限未开启，已切换为点击模式')
         return
       }
     }
-    if (!('DeviceMotionEvent' in window)) {
-      tapMode.value = true
-      permissionError.value = '当前设备未提供运动传感器，已切换为点击模式'
+    if (!window.isSecureContext) {
+      useTapMode('运动传感器需要 HTTPS，已切换为点击模式')
       return
     }
     motionHandler = (event: DeviceMotionEvent) => {
-      const acceleration = event.accelerationIncludingGravity
-      if (!acceleration || acceleration.x === null) return
+      const linear = event.acceleration
+      const gravity = event.accelerationIncludingGravity
+      const usingLinear =
+        Boolean(linear) &&
+        [linear?.x, linear?.y, linear?.z].some((value) => value !== null && value !== undefined)
+      const acceleration = usingLinear ? linear : gravity
+      const values = [acceleration?.x, acceleration?.y, acceleration?.z]
+      if (!acceleration || !values.some((value) => value !== null && value !== undefined)) return
       const now = performance.now()
+      if (!sensorHasData.value) {
+        sensorHasData.value = true
+        clearSensorWatchdog()
+        lastX = acceleration.x || 0
+        lastY = acceleration.y || 0
+        lastZ = acceleration.z || 0
+        lastTime = now
+        return
+      }
       const delta =
         Math.abs((acceleration.x || 0) - lastX) +
         Math.abs((acceleration.y || 0) - lastY) +
@@ -90,19 +121,62 @@ async function enableSensor() {
       lastY = acceleration.y || 0
       lastZ = acceleration.z || 0
       lastTime = now
-      if (elapsed > 30 && delta > 14) {
+      if (elapsed > 30 && delta > (usingLinear ? 3.5 : 10)) {
         lastBatch.value = Math.min(8, lastBatch.value + 1)
+        localCount.value += 1
         pulse.value = true
-        window.setTimeout(() => (pulse.value = false), 80)
+        window.setTimeout(() => (pulse.value = false), 120)
       }
     }
     window.addEventListener('devicemotion', motionHandler, { passive: true })
     enabled.value = true
+    requesting.value = false
     startSender()
+    armSensorWatchdog()
   } catch {
-    permissionError.value = '无法读取运动传感器，可使用点击模式参与'
-    tapMode.value = true
+    useTapMode('无法读取运动传感器，已切换为点击模式')
   }
+}
+
+function armSensorWatchdog() {
+  clearSensorWatchdog()
+  sensorWatchdog = window.setTimeout(() => {
+    if (phase.value === 'running' && !tapMode.value && !sensorHasData.value) {
+      useTapMode('未收到传感器数据，已切换为点击模式')
+    }
+  }, SENSOR_TIMEOUT_MS)
+}
+
+function clearSensorWatchdog() {
+  if (sensorWatchdog) {
+    window.clearTimeout(sensorWatchdog)
+    sensorWatchdog = undefined
+  }
+}
+
+function removeMotionHandler() {
+  if (motionHandler) {
+    window.removeEventListener('devicemotion', motionHandler)
+    motionHandler = undefined
+  }
+}
+
+function useTapMode(reason: string) {
+  clearSensorWatchdog()
+  removeMotionHandler()
+  enabled.value = false
+  requesting.value = false
+  tapMode.value = true
+  permissionError.value = reason
+  startSender()
+}
+
+function retrySensor() {
+  stop()
+  tapMode.value = false
+  permissionError.value = ''
+  sensorHasData.value = false
+  void enableSensor()
 }
 
 function startSender() {
@@ -129,21 +203,21 @@ function tap() {
   if (now - tapCooldown < 90) return
   tapCooldown = now
   lastBatch.value = Math.min(6, lastBatch.value + 1)
+  localCount.value += 1
   pulse.value = true
-  window.setTimeout(() => (pulse.value = false), 80)
+  window.setTimeout(() => (pulse.value = false), 120)
   startSender()
 }
 
 function stop() {
+  clearSensorWatchdog()
   if (sendTimer) {
     window.clearInterval(sendTimer)
     sendTimer = undefined
   }
-  if (motionHandler) {
-    window.removeEventListener('devicemotion', motionHandler)
-    motionHandler = undefined
-  }
+  removeMotionHandler()
   enabled.value = false
+  requesting.value = false
 }
 
 onBeforeUnmount(stop)
@@ -172,13 +246,31 @@ onBeforeUnmount(stop)
           摇得越起劲，分数涨得越快。请握稳手机，注意周围同事。
         </p>
         <div v-if="!enabled && !tapMode" class="row" style="justify-content: center; margin-top: 18px">
-          <button class="btn btn-primary" @click="enableSensor">开启运动权限</button>
+          <button class="btn btn-primary" :disabled="requesting" @click="enableSensor">
+            {{ requesting ? '正在请求运动权限…' : '开启运动权限' }}
+          </button>
         </div>
         <div v-else-if="tapMode" class="grid" style="margin-top: 18px">
-          <button class="btn btn-gold" style="min-height: 88px; font-size: 22px" @mousedown="tap" @touchstart.prevent="tap">
+          <button
+            class="btn btn-gold"
+            data-testid="tap-button"
+            style="min-height: 88px; font-size: 22px"
+            @mousedown="tap"
+            @touchstart.prevent="tap"
+          >
             快速点击参与
           </button>
-          <p class="muted small">传感器不可用时的同分参与模式</p>
+          <button class="btn btn-sm btn-ghost" @click="retrySensor">重新检测摇动</button>
+          <p class="small muted" data-testid="tap-count">点击已捕获 {{ localCount }} 次</p>
+        </div>
+        <div v-if="enabled" class="grid" style="margin-top: 18px">
+          <p class="small" data-testid="sensor-status" style="color: var(--teal); margin: 0">
+            {{ sensorHasData ? '传感器已连接，摇动手机' : '正在等待传感器数据…' }} · 已捕获
+            {{ localCount }} 次
+          </p>
+          <button class="btn btn-sm btn-ghost" @click="useTapMode('已切换到点击模式')">
+            摇动没反应？改用点击
+          </button>
         </div>
         <p v-if="permissionError" class="tag gold" style="margin-top: 12px">{{ permissionError }}</p>
         <div class="row" style="justify-content: center; margin-top: 16px">
