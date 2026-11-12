@@ -34,14 +34,17 @@ import {
 } from './db.ts'
 import {
   buildAdminOverview,
+  buildPlayerSnapshot,
   buildPlayerSummary,
   buildSnapshot,
   claimRedPacket,
+  compactPlayerSnapshot,
   drawLottery,
   finishExpired,
   finishRedPacket,
   finishShake,
   flushShakeScores,
+  invalidatePlayerSnapshot,
   isSamePerson,
   listParticipants,
   listClaims,
@@ -77,9 +80,16 @@ const server = http.createServer(app)
 const io = new SocketServer(server, {
   cors: { origin: process.env.PUBLIC_ORIGIN || true, credentials: true },
   maxHttpBufferSize: 1_000_000,
+  perMessageDeflate: {
+    threshold: 1024,
+    zlibDeflateOptions: { level: 3 }
+  },
   pingInterval: 20_000,
   pingTimeout: 20_000
 })
+
+server.keepAliveTimeout = 65_000
+server.headersTimeout = 66_000
 
 app.set('trust proxy', 1)
 app.use(express.json({ limit: '10mb' }))
@@ -124,7 +134,9 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/public', (_req, res) => {
   const settings = getSettings(db)
-  const snapshot = buildSnapshot(db)
+  const participantCount = Number(
+    (db.prepare('SELECT COUNT(*) AS count FROM participants').get() as { count: number }).count
+  )
   res.json({
     eventName: settings.eventName,
     company: settings.company,
@@ -132,7 +144,7 @@ app.get('/api/public', (_req, res) => {
     allowSelfRegistration: settings.allowSelfRegistration,
     requireSelfApproval: settings.requireSelfApproval,
     joinCodeRequired: Boolean(settings.joinCode),
-    participantCount: snapshot.join.participantCount
+    participantCount
   })
 })
 
@@ -483,6 +495,14 @@ app.get(
 
 const webDist = path.resolve(__dirname, '../web/dist')
 if (fs.existsSync(webDist)) {
+  app.use(
+    '/assets',
+    express.static(path.join(webDist, 'assets'), {
+      maxAge: '1y',
+      immutable: true,
+      index: false
+    })
+  )
   app.use(express.static(webDist, { maxAge: '1h', index: false }))
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next()
@@ -540,15 +560,27 @@ broadcastAll = () => {
     clearTimeout(screenTimer)
     screenTimer = undefined
   }
-  io.emit('state:snapshot', buildSnapshot(db))
+  invalidatePlayerSnapshot(db)
+  const snapshot = buildSnapshot(db)
+  io.to('screen').to('admin').emit('state:snapshot', snapshot)
+  io.to('players').except('screen').except('admin').emit(
+    'state:snapshot',
+    compactPlayerSnapshot(snapshot)
+  )
 }
 
 io.on('connection', (socket) => {
   const data = socket.data as SocketData
   if (data.screen) socket.join('screen')
   if (data.admin) socket.join('admin')
-  if (data.participant) socket.join(`participant:${data.participant.id}`)
-  socket.emit('state:snapshot', buildSnapshot(db))
+  if (data.participant) {
+    socket.join('players')
+    socket.join(`participant:${data.participant.id}`)
+  }
+  socket.emit(
+    'state:snapshot',
+    data.admin || data.screen ? buildSnapshot(db) : buildPlayerSnapshot(db)
+  )
   if (data.participant) {
     socket.emit('player:summary', buildPlayerSummary(db, data.participant.id))
   }
@@ -576,7 +608,6 @@ io.on('connection', (socket) => {
       const result = claimRedPacket(db, data.participant.id, requestId)
       ack?.(result)
       if (result.ok) {
-        socket.emit('player:summary', buildPlayerSummary(db, data.participant.id))
         broadcastScreen()
       }
     }
@@ -586,7 +617,7 @@ io.on('connection', (socket) => {
     'quiz:answer',
     (payload: { optionIndex?: number } | undefined, ack?: (value: unknown) => void) => {
       if (!data.participant) return ack?.({ ok: false, reason: 'unauthorized' })
-      const result = answerQuiz(db, data.participant.id, Number(payload?.optionIndex))
+      const result = answerQuiz(db, data.participant.id, Number(payload?.optionIndex), Date.now())
       ack?.(result)
       if (result.ok) {
         socket.emit('player:summary', buildPlayerSummary(db, data.participant.id))

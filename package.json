@@ -17,12 +17,14 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "build": "vite build --config web/vite.config.ts",
+    "postbuild": "node scripts/precompress.mjs",
     "start": "tsx server/index.ts",
     "test": "node --import tsx --test server/tests/*.test.ts",
     "test:ui": "node scripts/ui-smoke.mjs",
     "seed:demo": "tsx scripts/seed-demo.ts",
     "hash-password": "tsx scripts/hash-password.ts",
-    "loadtest": "tsx scripts/loadtest.ts"
+    "loadtest": "tsx scripts/loadtest.ts",
+    "stress-game": "tsx scripts/stress-game.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

@@ -101,6 +101,8 @@ const settingsSchema = z.object({
 
 export type Db = Database.Database
 
+const settingsCache = new WeakMap<Db, EventSettings>()
+
 function ensureDir(filePath: string) {
   if (filePath === ':memory:') return
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
@@ -200,6 +202,7 @@ function initializeSchema(db: Db) {
     CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
     CREATE INDEX IF NOT EXISTS idx_rounds_game ON rounds(game, id DESC);
     CREATE INDEX IF NOT EXISTS idx_claims_round ON packet_claims(round_id, id);
+    CREATE INDEX IF NOT EXISTS idx_claims_participant ON packet_claims(round_id, participant_id, id);
     CREATE INDEX IF NOT EXISTS idx_shake_rank ON shake_scores(round_id, score DESC);
     CREATE INDEX IF NOT EXISTS idx_answers_round ON quiz_answers(round_id, participant_id);
     CREATE INDEX IF NOT EXISTS idx_results_game ON results(game, round_id);
@@ -235,9 +238,14 @@ export function openDb(dbPath = process.env.DB_PATH || './data/gala.db'): Db {
   const db = new Database(dbPath)
   if (dbPath !== ':memory:') {
     db.pragma('journal_mode = WAL')
+    db.pragma('wal_autocheckpoint = 1000')
   }
+  db.pragma('synchronous = NORMAL')
   db.pragma('foreign_keys = ON')
   db.pragma('busy_timeout = 5000')
+  db.pragma('cache_size = -16384')
+  db.pragma('temp_store = MEMORY')
+  db.pragma('mmap_size = 67108864')
   initializeSchema(db)
   db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now())
   db.prepare('DELETE FROM admin_sessions WHERE expires_at < ?').run(Date.now())
@@ -258,11 +266,13 @@ export function openDb(dbPath = process.env.DB_PATH || './data/gala.db'): Db {
 }
 
 export function getSettings(db: Db): EventSettings {
+  const cached = settingsCache.get(db)
+  if (cached) return cached
   const row = db
     .prepare("SELECT value FROM settings WHERE key = 'event'")
     .get() as { value: string } | undefined
   const parsed = row ? JSON.parse(row.value) : {}
-  return settingsSchema.parse({
+  const settings = settingsSchema.parse({
     ...defaultSettings,
     ...parsed,
     shake: { ...defaultSettings.shake, ...(parsed as Partial<EventSettings>).shake },
@@ -272,12 +282,15 @@ export function getSettings(db: Db): EventSettings {
     },
     quiz: { ...defaultSettings.quiz, ...(parsed as Partial<EventSettings>).quiz }
   })
+  settingsCache.set(db, settings)
+  return settings
 }
 
 export function saveSettings(db: Db, next: unknown): EventSettings {
   const parsed = settingsSchema.parse(next)
   db.prepare("UPDATE settings SET value = ? WHERE key = 'event'").run(JSON.stringify(parsed))
   audit(db, 'admin', 'settings.update', JSON.stringify(parsed))
+  settingsCache.set(db, parsed)
   return parsed
 }
 
@@ -379,10 +392,13 @@ export function upsertRosterParticipant(
 export function createSession(db: Db, participantId: number): string {
   const token = randomToken()
   const now = Date.now()
-  db.prepare('DELETE FROM sessions WHERE participant_id = ?').run(participantId)
-  db.prepare(
-    'INSERT INTO sessions (token_hash, participant_id, created_at, expires_at) VALUES (?, ?, ?, ?)'
-  ).run(sha256(token), participantId, now, now + SESSION_TTL_MS)
+  const transaction = db.transaction(() => {
+    db.prepare('DELETE FROM sessions WHERE participant_id = ?').run(participantId)
+    db.prepare(
+      'INSERT INTO sessions (token_hash, participant_id, created_at, expires_at) VALUES (?, ?, ?, ?)'
+    ).run(sha256(token), participantId, now, now + SESSION_TTL_MS)
+  })
+  transaction()
   return token
 }
 
@@ -444,6 +460,30 @@ export function getQuestions(db: Db): Question[] {
     durationSec: row.duration_sec,
     points: row.points
   }))
+}
+
+export function getQuestionById(db: Db, id: number): Question | undefined {
+  const row = db.prepare('SELECT * FROM questions WHERE id = ?').get(id) as
+    | {
+        id: number
+        sort: number
+        text: string
+        options: string
+        correct_option: number
+        duration_sec: number
+        points: number
+      }
+    | undefined
+  if (!row) return undefined
+  return {
+    id: row.id,
+    sort: row.sort,
+    text: row.text,
+    options: JSON.parse(row.options) as string[],
+    correctOption: row.correct_option,
+    durationSec: row.duration_sec,
+    points: row.points
+  }
 }
 
 export function audit(db: Db, actor: string, action: string, detail: string) {

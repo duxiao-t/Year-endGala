@@ -10,6 +10,7 @@ import {
 } from '../db.ts'
 import {
   answerQuiz,
+  compactPlayerSnapshot,
   buildSnapshot,
   claimRedPacket,
   drawLottery,
@@ -77,6 +78,14 @@ test('game flow persists winners and never duplicates a lottery winner', async (
   assert.equal(new Set(result.winners?.map((winner) => winner.participantId)).size, 2)
   const lotterySnapshot = buildSnapshot(db)
   assert.equal(lotterySnapshot.lottery.lastDraw?.winners.length, 2)
+  const playerSnapshot = compactPlayerSnapshot(lotterySnapshot)
+  assert.equal(playerSnapshot.join.joinCode, '')
+  assert.deepEqual(playerSnapshot.shake.top, [])
+  assert.deepEqual(playerSnapshot.redpacket.recent, [])
+  assert.deepEqual(playerSnapshot.quiz.top, [])
+  assert.deepEqual(playerSnapshot.quiz.winners, [])
+  assert.deepEqual(playerSnapshot.lottery.visualNames, [])
+  assert.equal(playerSnapshot.eventName, lotterySnapshot.eventName)
   db.close()
 })
 

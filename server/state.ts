@@ -18,6 +18,7 @@ import type { Db } from './db.ts'
 import {
   audit,
   getParticipant,
+  getQuestionById,
   getQuestions,
   getSettings,
   toParticipant
@@ -55,7 +56,39 @@ interface ShakeCache {
   dirty: Set<number>
 }
 
+interface RedPacketRuntime {
+  roundId: number
+  config: EventSettings['redpacket']
+  endsAt: number
+  claimedCount: number
+  spentFen: number
+  ownCounts: Map<number, number>
+  lastClaimAt: Map<number, number>
+  requests: Map<string, { amountFen: number; claimCode: string }>
+}
+
+interface QuizRuntime {
+  roundId: number
+  questionId: number
+  optionCount: number
+  correctOption: number
+  durationSec: number
+  points: number
+  endsAt: number
+  basePoints: number
+  speedBonusMax: number
+}
+
+interface ShakeRoundRuntime {
+  roundId: number
+  startsAt: number
+  endsAt: number
+}
+
 let shakeCache: ShakeCache | null = null
+const redPacketRuntimes = new WeakMap<Db, RedPacketRuntime>()
+const quizRuntimes = new WeakMap<Db, QuizRuntime>()
+const shakeRoundRuntimes = new WeakMap<Db, ShakeRoundRuntime>()
 
 function requireView(value: string): ViewKey {
   if (value === 'lobby') return 'lobby'
@@ -89,6 +122,71 @@ export function latestRound(db: Db, game: GameKey): RoundRow | undefined {
 function runningRound(db: Db, game: GameKey): RoundRow | undefined {
   const round = latestRound(db, game)
   return round && ['running', 'question'].includes(round.status) ? round : undefined
+}
+
+function redPacketRuntime(db: Db, round: RoundRow): RedPacketRuntime {
+  const cached = redPacketRuntimes.get(db)
+  if (cached?.roundId === round.id) return cached
+  const roundConfig = parseJson<{ config?: EventSettings['redpacket'] }>(round.data, {}).config
+  const config = roundConfig || getSettings(db).redpacket
+  const rows = db
+    .prepare(
+      `SELECT participant_id, request_id, amount_fen, claim_code, created_at
+       FROM packet_claims WHERE round_id = ? ORDER BY id ASC`
+    )
+    .all(round.id) as Array<{
+    participant_id: number
+    request_id: string
+    amount_fen: number
+    claim_code: string
+    created_at: number
+  }>
+  const runtime: RedPacketRuntime = {
+    roundId: round.id,
+    config,
+    endsAt: round.ends_at || 0,
+    claimedCount: rows.length,
+    spentFen: 0,
+    ownCounts: new Map(),
+    lastClaimAt: new Map(),
+    requests: new Map()
+  }
+  for (const row of rows) {
+    runtime.spentFen += row.amount_fen
+    runtime.ownCounts.set(row.participant_id, (runtime.ownCounts.get(row.participant_id) || 0) + 1)
+    runtime.lastClaimAt.set(row.participant_id, row.created_at)
+    runtime.requests.set(row.request_id, {
+      amountFen: row.amount_fen,
+      claimCode: row.claim_code
+    })
+  }
+  redPacketRuntimes.set(db, runtime)
+  return runtime
+}
+
+function quizRuntime(db: Db, round: RoundRow): QuizRuntime | undefined {
+  const cached = quizRuntimes.get(db)
+  if (cached?.roundId === round.id) return cached
+  if (!round.ends_at) return undefined
+  const data = parseJson<QuizRoundData>(round.data, { questionIds: [], index: 0 })
+  const questionId = data.questionIds[data.index]
+  if (!questionId) return undefined
+  const question = getQuestionById(db, questionId)
+  if (!question) return undefined
+  const settings = getSettings(db)
+  const runtime: QuizRuntime = {
+    roundId: round.id,
+    questionId: question.id,
+    optionCount: question.options.length,
+    correctOption: question.correctOption,
+    durationSec: question.durationSec,
+    points: question.points,
+    endsAt: round.ends_at,
+    basePoints: settings.quiz.basePoints,
+    speedBonusMax: settings.quiz.speedBonusMax
+  }
+  quizRuntimes.set(db, runtime)
+  return runtime
 }
 
 function createRound(
@@ -482,6 +580,50 @@ export function buildSnapshot(db: Db): LiveSnapshot {
   }
 }
 
+const playerSnapshotCache = new WeakMap<Db, LiveSnapshot>()
+
+export function compactPlayerSnapshot(full: LiveSnapshot): LiveSnapshot {
+  return {
+    ...full,
+    join: {
+      ...full.join,
+      joinCode: ''
+    },
+    shake: {
+      ...full.shake,
+      top: []
+    },
+    redpacket: {
+      ...full.redpacket,
+      recent: []
+    },
+    quiz: {
+      ...full.quiz,
+      top: [],
+      winners: []
+    },
+    lottery: {
+      ...full.lottery,
+      visualNames: [],
+      lastDraw: full.lottery.lastDraw
+        ? { ...full.lottery.lastDraw, winners: [] }
+        : undefined
+    }
+  }
+}
+
+export function invalidatePlayerSnapshot(db: Db) {
+  playerSnapshotCache.delete(db)
+}
+
+export function buildPlayerSnapshot(db: Db): LiveSnapshot {
+  const cached = playerSnapshotCache.get(db)
+  if (cached) return cached
+  const snapshot = compactPlayerSnapshot(buildSnapshot(db))
+  playerSnapshotCache.set(db, snapshot)
+  return snapshot
+}
+
 export function buildPlayerSummary(db: Db, participantId: number): PlayerSummary {
   const participantRow = getParticipant(db, participantId)
   if (!participantRow) throw new Error('participant not found')
@@ -503,6 +645,12 @@ export function buildPlayerSummary(db: Db, participantId: number): PlayerSummary
         ) + 1
       : null
   }
+  const shakePhase: PlayerSummary['shake']['phase'] =
+    shakeRound?.status === 'running'
+      ? 'running'
+      : shakeRound?.status === 'finished'
+        ? 'finished'
+        : 'idle'
   const redpacketRound = latestRound(db, 'redpacket')
   const claims = redpacketRound
     ? (db.prepare(
@@ -578,7 +726,7 @@ export function buildPlayerSummary(db: Db, participantId: number): PlayerSummary
     shake: {
       score: shakeScore,
       rank: shakeRank,
-      phase: shakeSnapshot(db, settings).phase
+      phase: shakePhase
     },
     redpacket: {
       claimedCount: claims.length,
@@ -616,16 +764,19 @@ export function startShake(db: Db): { roundId: number; endsAt: number } {
   ensureGameCanStart(db, 'shake')
   ensureNoRunningGame(db, 'shake')
   const now = Date.now()
-  const roundId = createRound(db, 'shake', 'running', now, now + settings.shake.durationSec * 1000)
+  const endsAt = now + settings.shake.durationSec * 1000
+  const roundId = createRound(db, 'shake', 'running', now, endsAt)
+  shakeRoundRuntimes.set(db, { roundId, startsAt: now, endsAt })
   shakeCache = { roundId, scores: new Map(), dirty: new Set() }
   setView(db, 'shake')
   audit(db, 'admin', 'shake.start', String(roundId))
-  return { roundId, endsAt: now + settings.shake.durationSec * 1000 }
+  return { roundId, endsAt }
 }
 
 export function finishShake(db: Db): boolean {
   const round = latestRound(db, 'shake')
   if (!round || round.status !== 'running') return false
+  shakeRoundRuntimes.delete(db)
   flushShakeScores(db)
   const settings = getSettings(db)
   const rows = db
@@ -666,17 +817,27 @@ export function submitShakeBatch(
   if (!participant || participant.status !== 'active') {
     return { ok: false, reason: 'invalid' }
   }
-  const round = runningRound(db, 'shake')
-  if (!round || !round.ends_at || Date.now() > round.ends_at) {
+  let runtime = shakeRoundRuntimes.get(db)
+  if (!runtime) {
+    const round = runningRound(db, 'shake')
+    if (!round?.ends_at) return { ok: false, reason: 'closed' }
+    runtime = {
+      roundId: round.id,
+      startsAt: round.starts_at || Date.now(),
+      endsAt: round.ends_at
+    }
+    shakeRoundRuntimes.set(db, runtime)
+  }
+  if (!runtime.endsAt || Date.now() > runtime.endsAt) {
     return { ok: false, reason: 'closed' }
   }
   const safeDelta = Math.max(0, Math.min(12, Math.floor(delta)))
   if (safeDelta === 0) {
     return { ok: false, reason: 'invalid' }
   }
-  ensureShakeCache(db, round.id)
+  ensureShakeCache(db, runtime.roundId)
   const existing = shakeCache?.scores.get(participantId)
-  const elapsedSec = Math.max(0, (Date.now() - (round.starts_at || Date.now())) / 1000)
+  const elapsedSec = Math.max(0, (Date.now() - runtime.startsAt) / 1000)
   const maxScore = Math.floor(elapsedSec * 24) + 12
   const nextScore = Math.min(maxScore, (existing?.score || 0) + safeDelta)
   shakeCache?.scores.set(participantId, { score: nextScore, updatedAt: Date.now() })
@@ -729,6 +890,16 @@ export function startRedPacket(db: Db): { roundId: number; endsAt: number } {
   const roundId = createRound(db, 'redpacket', 'running', now, endsAt, {
     config: settings.redpacket
   })
+  redPacketRuntimes.set(db, {
+    roundId,
+    config: settings.redpacket,
+    endsAt,
+    claimedCount: 0,
+    spentFen: 0,
+    ownCounts: new Map(),
+    lastClaimAt: new Map(),
+    requests: new Map()
+  })
   setView(db, 'redpacket')
   audit(db, 'admin', 'redpacket.start', String(roundId))
   return { roundId, endsAt }
@@ -737,6 +908,7 @@ export function startRedPacket(db: Db): { roundId: number; endsAt: number } {
 export function finishRedPacket(db: Db): boolean {
   const round = latestRound(db, 'redpacket')
   if (!round || round.status !== 'running') return false
+  redPacketRuntimes.delete(db)
   updateRound(db, round.id, { status: 'finished', ends_at: Date.now() })
   audit(db, 'system', 'redpacket.finish', String(round.id))
   return true
@@ -751,50 +923,44 @@ export function claimRedPacket(
   if (!participant || participant.status !== 'active') {
     return { ok: false, reason: 'closed' }
   }
-  const round = runningRound(db, 'redpacket')
-  if (!round || !round.ends_at || Date.now() > round.ends_at) {
+  let runtime = redPacketRuntimes.get(db)
+  if (!runtime) {
+    const round = runningRound(db, 'redpacket')
+    if (!round) return { ok: false, reason: 'closed' }
+    runtime = redPacketRuntime(db, round)
+  }
+  const now = Date.now()
+  if (!runtime.endsAt || now > runtime.endsAt) {
     return { ok: false, reason: 'closed' }
   }
-  const settings = getSettings(db)
-  const config =
-    parseJson<{ config?: EventSettings['redpacket'] }>(round.data, {}).config ||
-    settings.redpacket
-  const existingRequest = db
-    .prepare('SELECT amount_fen, claim_code FROM packet_claims WHERE request_id = ? AND round_id = ?')
-    .get(requestId, round.id) as { amount_fen: number; claim_code: string } | undefined
+  const existingRequest = runtime.requests.get(requestId)
   if (existingRequest) {
     return {
       ok: true,
-      amountFen: existingRequest.amount_fen,
-      claimCode: existingRequest.claim_code
+      amountFen: existingRequest.amountFen,
+      claimCode: existingRequest.claimCode
     }
   }
-  const countRow = db
-    .prepare('SELECT COUNT(*) AS count FROM packet_claims WHERE round_id = ?')
-    .get(round.id) as { count: number }
-  if (countRow.count >= config.packetCount) {
+  if (runtime.claimedCount >= runtime.config.packetCount) {
     return { ok: false, reason: 'empty' }
   }
-  const ownCount = Number(
-    (db.prepare('SELECT COUNT(*) AS count FROM packet_claims WHERE round_id = ? AND participant_id = ?')
-      .get(round.id, participantId) as { count: number }).count
-  )
-  if (ownCount >= config.maxClaims) {
-    return { ok: false, reason: 'limit', claimedCount: ownCount, maxClaims: config.maxClaims }
+  const ownCount = runtime.ownCounts.get(participantId) || 0
+  if (ownCount >= runtime.config.maxClaims) {
+    return {
+      ok: false,
+      reason: 'limit',
+      claimedCount: ownCount,
+      maxClaims: runtime.config.maxClaims
+    }
   }
-  const lastClaim = db
-    .prepare('SELECT created_at FROM packet_claims WHERE round_id = ? AND participant_id = ? ORDER BY id DESC LIMIT 1')
-    .get(round.id, participantId) as { created_at: number } | undefined
-  if (lastClaim && Date.now() - lastClaim.created_at < 250) {
+  const lastClaimAt = runtime.lastClaimAt.get(participantId)
+  if (lastClaimAt && now - lastClaimAt < 250) {
     return { ok: false, reason: 'rate' }
   }
-  const spentRow = db
-    .prepare('SELECT COALESCE(SUM(amount_fen), 0) AS amount FROM packet_claims WHERE round_id = ?')
-    .get(round.id) as { amount: number }
   const amount = nextRedPacketAmount({
-    config,
-    spentFen: spentRow.amount,
-    claimedCount: countRow.count
+    config: runtime.config,
+    spentFen: runtime.spentFen,
+    claimedCount: runtime.claimedCount
   })
   if (!amount) return { ok: false, reason: 'empty' }
   const claimCode = randomClaimCode()
@@ -802,7 +968,7 @@ export function claimRedPacket(
     db.prepare(
       `INSERT INTO packet_claims (round_id, participant_id, request_id, amount_fen, claim_code, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(round.id, participantId, requestId, amount, claimCode, Date.now())
+    ).run(runtime.roundId, participantId, requestId, amount, claimCode, now)
   } catch (error) {
     const duplicate = db
       .prepare('SELECT amount_fen, claim_code FROM packet_claims WHERE request_id = ?')
@@ -812,16 +978,22 @@ export function claimRedPacket(
     }
     throw error
   }
+  runtime.claimedCount += 1
+  runtime.spentFen += amount
+  runtime.ownCounts.set(participantId, ownCount + 1)
+  runtime.lastClaimAt.set(participantId, now)
+  runtime.requests.set(requestId, { amountFen: amount, claimCode })
   return {
     ok: true,
     amountFen: amount,
     claimCode,
     claimedCount: ownCount + 1,
-    maxClaims: config.maxClaims
+    maxClaims: runtime.config.maxClaims
   }
 }
 
 export function startQuiz(db: Db): { roundId: number; endsAt: number } {
+  quizRuntimes.delete(db)
   const questions = getQuestions(db)
   if (questions.length === 0) throw new Error('题库为空，请先导入题目')
   ensureGameCanStart(db, 'quiz')
@@ -844,6 +1016,7 @@ export function startQuiz(db: Db): { roundId: number; endsAt: number } {
 function finishQuiz(db: Db): boolean {
   const round = latestRound(db, 'quiz')
   if (!round || round.status === 'finished') return false
+  quizRuntimes.delete(db)
   const settings = getSettings(db)
   const rows = quizLeaderboard(db, round.id, settings).slice(0, settings.quiz.winners)
   const insert = db.prepare(
@@ -871,6 +1044,7 @@ export function quizAction(
   const round = latestRound(db, 'quiz')
   if (!round) return { ok: false, message: '答题尚未开始' }
   if (round.status === 'finished') return { ok: false, message: '答题已结束' }
+  quizRuntimes.delete(db)
   const data = parseJson<QuizRoundData>(round.data, { questionIds: [], index: 0 })
   if (action === 'lock') {
     updateRound(db, round.id, { status: 'locked', ends_at: Date.now() })
@@ -904,44 +1078,45 @@ export function quizAction(
 export function answerQuiz(
   db: Db,
   participantId: number,
-  optionIndex: number
+  optionIndex: number,
+  receivedAt = Date.now()
 ): { ok: boolean; reason?: string; correct?: boolean; score?: number } {
   const participant = getParticipant(db, participantId)
   if (!participant || participant.status !== 'active') {
     return { ok: false, reason: 'closed' }
   }
-  const round = runningRound(db, 'quiz')
-  if (!round || round.status !== 'question' || !round.ends_at) {
-    return { ok: false, reason: 'closed' }
+  let runtime = quizRuntimes.get(db)
+  if (!runtime) {
+    const round = runningRound(db, 'quiz')
+    if (!round || round.status !== 'question') return { ok: false, reason: 'closed' }
+    runtime = quizRuntime(db, round)
+    if (!runtime) return { ok: false, reason: 'closed' }
   }
-  if (Date.now() > round.ends_at) return { ok: false, reason: 'closed' }
+  if (Date.now() > runtime.endsAt) return { ok: false, reason: 'closed' }
   if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex > 5) {
     return { ok: false, reason: 'invalid' }
   }
-  const data = parseJson<QuizRoundData>(round.data, { questionIds: [], index: 0 })
-  const questions = getQuestions(db)
-  const question = questions.find((item) => item.id === data.questionIds[data.index])
-  if (!question || optionIndex >= question.options.length) {
+  if (optionIndex >= runtime.optionCount) {
     return { ok: false, reason: 'invalid' }
   }
-  const settings = getSettings(db)
-  const correct = optionIndex === question.correctOption
+  const correct = optionIndex === runtime.correctOption
   const basePoints = Math.max(
     1,
-    Math.round((settings.quiz.basePoints * question.points) / 100)
+    Math.round((runtime.basePoints * runtime.points) / 100)
   )
   const score = correct
     ? speedScore(
-        { basePoints, speedBonusMax: settings.quiz.speedBonusMax },
-        round.ends_at,
-        question.durationSec
+        { basePoints, speedBonusMax: runtime.speedBonusMax },
+        runtime.endsAt,
+        runtime.durationSec,
+        receivedAt
       )
     : 0
   try {
     db.prepare(
       `INSERT INTO quiz_answers (round_id, question_id, participant_id, option_index, correct, score, answered_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(round.id, question.id, participantId, optionIndex, correct ? 1 : 0, score, Date.now())
+    ).run(runtime.roundId, runtime.questionId, participantId, optionIndex, correct ? 1 : 0, score, Date.now())
   } catch {
     return { ok: false, reason: 'duplicate' }
   }
@@ -951,6 +1126,7 @@ export function answerQuiz(
 export function lockExpiredQuiz(db: Db): boolean {
   const round = latestRound(db, 'quiz')
   if (round?.status !== 'question' || !round.ends_at || Date.now() < round.ends_at) return false
+  quizRuntimes.delete(db)
   updateRound(db, round.id, { status: 'locked', ends_at: Date.now() })
   audit(db, 'system', 'quiz.auto_lock', String(round.id))
   return true
@@ -1056,7 +1232,12 @@ export function redeemClaim(db: Db, claimId: number): boolean {
 }
 
 export function resetGame(db: Db, game: GameKey): boolean {
-  if (game === 'shake') shakeCache = null
+  if (game === 'shake') {
+    shakeCache = null
+    shakeRoundRuntimes.delete(db)
+  }
+  if (game === 'redpacket') redPacketRuntimes.delete(db)
+  if (game === 'quiz') quizRuntimes.delete(db)
   const table =
     game === 'shake'
       ? 'shake_scores'

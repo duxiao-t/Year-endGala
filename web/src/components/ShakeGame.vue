@@ -120,7 +120,7 @@ function startSender() {
     } catch {
       // Connection errors are retried by the next batch.
     }
-  }, 500)
+  }, 1000)
 }
 
 function tap() {

@@ -12,7 +12,12 @@ const router = useRouter()
 const { snapshot, player, connected, lastError, connectLive, disconnectLive, syncPlayer } = useLive()
 const loading = ref(true)
 const fatal = ref('')
-const refreshTimer = window.setInterval(() => syncPlayer(), 5000)
+const SYNC_INTERVAL_MS = 30_000
+let refreshTimer: number | undefined
+
+function syncWhenVisible() {
+  if (document.visibilityState === 'visible') syncPlayer()
+}
 
 const view = computed(() => snapshot.value?.view || player.value?.view || 'lobby')
 const currentGameLabel = computed(() => {
@@ -25,6 +30,8 @@ const currentGameLabel = computed(() => {
   }[view.value]
 })
 onMounted(async () => {
+  refreshTimer = window.setInterval(syncWhenVisible, SYNC_INTERVAL_MS)
+  document.addEventListener('visibilitychange', syncWhenVisible)
   try {
     const me = await api.me()
     if (me.participant.status === 'pending') {
@@ -57,7 +64,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  window.clearInterval(refreshTimer)
+  if (refreshTimer) window.clearInterval(refreshTimer)
+  document.removeEventListener('visibilitychange', syncWhenVisible)
   disconnectLive()
 })
 

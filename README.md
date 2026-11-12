@@ -22,6 +22,8 @@ npm run build
 npm start
 ```
 
+生产环境可以直接用 Nginx 托管 SPA 和 `/assets/`，只把 `/api/`、`/socket.io/` 反代给 Node。示例配置见 `deploy/nginx/year-end-gala.conf.example`，部署时需替换域名、项目路径和证书路径。
+
 生产环境必须提供 `ADMIN_PASSWORD` 或 `ADMIN_PASSWORD_HASH` 以及 `SCREEN_TOKEN`，否则服务会拒绝启动。
 
 ## Docker + HTTPS
@@ -73,12 +75,23 @@ Socket.IO 使用 `/live` 默认命名空间：玩家发送 `shake:batch`、`pack
 ## 千人现场检查
 
 1. 使用有公网 HTTPS 域名的主机；iOS 运动权限需要安全上下文。
-2. 在目标云主机执行 `LOAD_INTERVAL_MS=500 LOAD_SECONDS=20 npm run loadtest -- https://your-domain.example 1000`，先确认连接成功率和 p95 ack。
+2. 在目标云主机执行 `LOAD_INTERVAL_MS=1000 LOAD_SECONDS=20 npm run loadtest -- https://your-domain.example 1000`，先确认连接成功率和 p95 ack。`LOAD_PATH_PREFIX` 可把请求挂到隔离测试入口，`LOAD_DRAIN_SECONDS` 用于等待在途 ACK 排空。
 3. 用 20–50 台真机做彩排，覆盖 iOS Safari 与 Android Chrome，实际摇动、滑动和答题。
 4. 活动前导出一次名单并备份 `data/gala.db`；活动中不要修改正在进行的红包预算。
 5. 现场 Wi-Fi、AP 数量和公网出口不是应用能修复的部分，需单独验收。
 
-本机验收记录（WSL，单机同时运行服务端与 1000 个 Socket 客户端，500ms 上报、5 秒）：连接 `1000/1000`、ack `9000`、错误 `0`、p95 `363ms`。这证明应用热路径和内存聚合可用，但不能替代目标云主机、真实运营商网络和手机传感器彩排。
+红包和答题可通过隔离数据库做公网并发验收：
+
+```bash
+DB_PATH=/tmp/gala-stress/gala.db JOIN_CODE=... ADMIN_PASSWORD=... \
+  LOAD_PATH_PREFIX=/隔离路径 npm run stress-game -- https://your-domain.example 1000
+```
+
+该脚本会写入测试轮次和领取记录，只能指向专用测试库；不要对正式 `data/gala.db` 运行。
+
+2026-11-12 公网 HTTPS 实测（2 vCPU / 2GB、EIP 2 Mbps）：1000 个 WebSocket 连接成功 `999/1000`；优化后 1 秒上报节奏下摇一摇 ACK 完成率 `95%`、p95 `1.44s`、p99 `4.11s`；红包和答题各 `1000/1000` 成功、p95 约 `1.4–1.5s`。隔离 Node 在游戏高峰平均只使用约 `0.05–0.09` 核，主要瓶颈是 2 Mbps 公网带宽，而不是应用 CPU 或 SQLite。
+
+结论：2 Mbps EIP 能承载功能验证和小规模活动，但不适合 1000 人同时入场/持续摇一摇。建议至少升级到 20 Mbps，1000 人活动优先 50 Mbps，并把 `/assets/` 静态资源放到 CDN/对象存储；如暂时保留 2 Mbps，应限制同时在线人数、让用户提前错峰入场，并接受摇一摇积分更新延迟。
 
 ## 配置项
 
