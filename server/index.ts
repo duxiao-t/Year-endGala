@@ -1,10 +1,12 @@
 import fs from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { Server as SocketServer } from 'socket.io'
 import { z } from 'zod'
+import { BACKGROUND_MUSIC_PATH, MAX_BACKGROUND_MUSIC_BYTES, MAX_COUNTDOWN_SECONDS } from '../shared/types.ts'
 import type { EventSettings, GameKey, Participant, ViewKey } from '../shared/types.ts'
 import {
   ADMIN_COOKIE,
@@ -58,6 +60,7 @@ import {
   quizAction,
   submitShakeBatch,
   updateParticipantStatus,
+  updateStageCountdown,
   voidResult
 } from './state.ts'
 import { importParticipants, importQuestions, exportWorkbook, addParticipant, addQuestion } from './transfer.ts'
@@ -75,6 +78,7 @@ if (fs.existsSync('.env')) {
 const PORT = Number(process.env.PORT || 3000)
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || ''
 const db = openDb()
+const musicDir = path.resolve(path.dirname(process.env.DB_PATH || './data/gala.db'), 'music')
 const app = express()
 const server = http.createServer(app)
 const io = new SocketServer(server, {
@@ -241,6 +245,7 @@ function mergeSettings(current: EventSettings, patch: Partial<EventSettings>): E
   return {
     ...current,
     ...patch,
+    backgroundMusic: { ...current.backgroundMusic, ...patch.backgroundMusic },
     shake: { ...current.shake, ...(patch.shake || {}) },
     redpacket: { ...current.redpacket, ...(patch.redpacket || {}) },
     quiz: { ...current.quiz, ...(patch.quiz || {}) },
@@ -255,8 +260,51 @@ app.patch('/api/admin/settings', requireAdmin(db), (req, res) => {
     broadcastAll()
     res.json(saved)
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      const musicIssue = error.issues.find(issue => issue.path[0] === 'backgroundMusic')
+      if (musicIssue) return fail(res, 400, musicIssue.message)
+    }
     fail(res, 400, error instanceof Error ? error.message : '配置不合法')
   }
+})
+
+const readMusicUpload = express.raw({ type: 'audio/mpeg', limit: MAX_BACKGROUND_MUSIC_BYTES, inflate: false })
+
+app.post('/api/admin/music', requireAdmin(db), (req, res, next) => {
+  readMusicUpload(req, res, (error?: { status?: number }) => {
+    if (error?.status === 413) return fail(res, 413, 'MP3 文件不能超过 20 MB')
+    if (error) return next(error)
+    next()
+  })
+}, asyncRoute(async (req, res) => {
+  const audio = req.body
+  if (!Buffer.isBuffer(audio) || audio.length < 10 || (
+    audio.toString('ascii', 0, 3) !== 'ID3' && !(audio[0] === 0xff && (audio[1] & 0xe0) === 0xe0)
+  )) {
+    return fail(res, 400, '请选择有效的 MP3 文件')
+  }
+
+  const name = `${createHash('sha256').update(audio).digest('hex')}.mp3`
+  await fs.promises.mkdir(musicDir, { recursive: true })
+  const temporaryFile = path.join(musicDir, `${randomUUID()}.tmp`)
+  try {
+    await fs.promises.writeFile(temporaryFile, audio, { flag: 'wx' })
+    await fs.promises.rename(temporaryFile, path.join(musicDir, name))
+  } finally {
+    await fs.promises.rm(temporaryFile, { force: true })
+  }
+  res.json({ url: `${BACKGROUND_MUSIC_PATH}${name}` })
+}))
+
+app.get(`${BACKGROUND_MUSIC_PATH}:file`, (req, res, next) => {
+  if (!/^[a-f0-9]{64}\.mp3$/.test(req.params.file)) return fail(res, 404, '音频不存在')
+  res.set('X-Content-Type-Options', 'nosniff')
+  res.sendFile(req.params.file, { root: musicDir, maxAge: '1y', immutable: true }, (error) => {
+    if (!error) return
+    if (res.headersSent) return next(error)
+    const status = (error as Error & { status?: number }).status || 500
+    fail(res, status, status === 404 ? '音频不存在' : '无法读取音频')
+  })
 })
 
 app.get('/api/admin/participants', requireAdmin(db), (req, res) => {
@@ -406,6 +454,23 @@ app.post('/api/admin/view', requireAdmin(db), (req, res) => {
   res.json({ ok: true })
 })
 
+const countdownCommandSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.enum(['preview', 'start']), durationSec: z.number().int().min(1).max(MAX_COUNTDOWN_SECONDS) }),
+  z.object({ action: z.literal('reset') })
+])
+
+app.post('/api/admin/countdown', requireAdmin(db), (req, res) => {
+  const command = countdownCommandSchema.safeParse(req.body)
+  if (!command.success) return fail(res, 400, `请输入 1–${MAX_COUNTDOWN_SECONDS} 的整数秒数`)
+  try {
+    updateStageCountdown(db, command.data)
+    broadcastAll()
+    res.json(buildAdminOverview(db))
+  } catch (error) {
+    fail(res, 400, error instanceof Error ? error.message : '倒计时操作失败')
+  }
+})
+
 app.post('/api/admin/games/:game/action', requireAdmin(db), (req, res) => {
   const game = req.params.game as GameKey
   const action = String(req.body?.action || '')
@@ -517,7 +582,8 @@ if (fs.existsSync(webDist)) {
   })
 }
 
-app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) return next(error)
   console.error(error)
   fail(res, 500, error instanceof Error ? error.message : '服务器错误')
 })

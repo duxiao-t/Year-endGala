@@ -1,3 +1,4 @@
+import { DEFAULT_COUNTDOWN_SECONDS, MAX_COUNTDOWN_SECONDS } from '../shared/types.ts'
 import type {
   AdminOverview,
   ClaimResponse,
@@ -11,6 +12,7 @@ import type {
   RedPacketSnapshot,
   ShakeAck,
   ShakeSnapshot,
+  StageCountdown,
   ViewKey,
   Winner
 } from '../shared/types.ts'
@@ -89,9 +91,10 @@ let shakeCache: ShakeCache | null = null
 const redPacketRuntimes = new WeakMap<Db, RedPacketRuntime>()
 const quizRuntimes = new WeakMap<Db, QuizRuntime>()
 const shakeRoundRuntimes = new WeakMap<Db, ShakeRoundRuntime>()
+const stageCountdowns = new WeakMap<Db, StageCountdown>()
 
 function requireView(value: string): ViewKey {
-  if (value === 'lobby') return 'lobby'
+  if (value === 'lobby' || value === 'countdown') return value
   if (value === 'shake' || value === 'redpacket' || value === 'quiz' || value === 'lottery') {
     return value
   }
@@ -111,6 +114,51 @@ export function setView(db: Db, view: ViewKey) {
     "INSERT INTO settings (key, value) VALUES ('view', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
   ).run(view)
   audit(db, 'admin', 'view.switch', view)
+}
+
+function playerView(view: ViewKey) {
+  return view === 'countdown' ? 'lobby' : view
+}
+
+export function getStageCountdown(db: Db): StageCountdown {
+  const cached = stageCountdowns.get(db)
+  if (cached) return cached
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'stage_countdown'").get() as
+    | { value: string }
+    | undefined
+  const countdown = parseJson<StageCountdown>(row?.value || '', { durationSec: DEFAULT_COUNTDOWN_SECONDS })
+  stageCountdowns.set(db, countdown)
+  return countdown
+}
+
+export function updateStageCountdown(
+  db: Db,
+  command: { action: 'preview' | 'start'; durationSec: number } | { action: 'reset' },
+  now = Date.now()
+) {
+  const current = getStageCountdown(db)
+  if (command.action !== 'reset') {
+    if (!Number.isInteger(command.durationSec) || command.durationSec < 1 || command.durationSec > MAX_COUNTDOWN_SECONDS) {
+      throw new Error(`倒计时请输入 1–${MAX_COUNTDOWN_SECONDS} 的整数秒数`)
+    }
+    if (getView(db) === 'countdown' && (current.endsAt ?? 0) > now) {
+      throw new Error('倒计时正在进行，请先重置')
+    }
+  }
+
+  const countdown: StageCountdown = {
+    durationSec: command.action === 'reset' ? current.durationSec : command.durationSec
+  }
+  if (command.action === 'start') countdown.endsAt = now + countdown.durationSec * 1000
+
+  db.transaction(() => {
+    db.prepare(
+      "INSERT INTO settings (key, value) VALUES ('stage_countdown', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run(JSON.stringify(countdown))
+    if (command.action !== 'reset') setView(db, 'countdown')
+    audit(db, 'admin', `countdown.${command.action}`, String(countdown.durationSec))
+  })()
+  stageCountdowns.set(db, countdown)
 }
 
 export function latestRound(db: Db, game: GameKey): RoundRow | undefined {
@@ -562,6 +610,8 @@ export function buildSnapshot(db: Db): LiveSnapshot {
     eventName: settings.eventName,
     company: settings.company,
     publicOrigin: process.env.PUBLIC_ORIGIN || '',
+    backgroundMusic: settings.backgroundMusic,
+    countdown: getStageCountdown(db),
     join: {
       joinMode: settings.joinMode,
       allowSelfRegistration: settings.allowSelfRegistration,
@@ -583,8 +633,10 @@ export function buildSnapshot(db: Db): LiveSnapshot {
 const playerSnapshotCache = new WeakMap<Db, LiveSnapshot>()
 
 export function compactPlayerSnapshot(full: LiveSnapshot): LiveSnapshot {
+  const { backgroundMusic: _backgroundMusic, countdown: _countdown, ...playerSnapshot } = full
   return {
-    ...full,
+    ...playerSnapshot,
+    view: playerView(full.view),
     join: {
       ...full.join,
       joinCode: ''
@@ -722,7 +774,7 @@ export function buildPlayerSummary(db: Db, participantId: number): PlayerSummary
   }>
   return {
     participant,
-    view: getView(db),
+    view: playerView(getView(db)),
     shake: {
       score: shakeScore,
       rank: shakeRank,

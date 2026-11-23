@@ -1,5 +1,14 @@
 export type GameKey = 'shake' | 'redpacket' | 'quiz' | 'lottery';
-export type ViewKey = 'lobby' | GameKey;
+export type ViewKey = 'lobby' | 'countdown' | GameKey;
+export type PlayerViewKey = Exclude<ViewKey, 'countdown'>;
+
+export const DEFAULT_COUNTDOWN_SECONDS = 30;
+export const MAX_COUNTDOWN_SECONDS = 3600;
+
+export interface StageCountdown {
+  durationSec: number;
+  endsAt?: number;
+}
 export type EligibilityPolicy =
   | 'independent'
   | 'exclude_game_winners_from_lottery'
@@ -55,6 +64,16 @@ export interface QuizSettings {
   prizeName: string;
 }
 
+export interface BackgroundMusicSettings {
+  enabled: boolean;
+  url: string;
+  volume: number;
+  loop: boolean;
+}
+
+export const MAX_BACKGROUND_MUSIC_BYTES = 20 * 1024 * 1024;
+export const BACKGROUND_MUSIC_PATH = '/api/screen/music/';
+
 export interface EventSettings {
   eventName: string;
   company: string;
@@ -65,6 +84,7 @@ export interface EventSettings {
   eligibilityPolicy: EligibilityPolicy;
   displayNameMode: 'masked' | 'full';
   drawVisualCards: number;
+  backgroundMusic: BackgroundMusicSettings;
   shake: ShakeSettings;
   redpacket: RedPacketSettings;
   quiz: QuizSettings;
@@ -163,6 +183,8 @@ export interface LiveSnapshot {
   eventName: string;
   company: string;
   publicOrigin: string;
+  backgroundMusic?: BackgroundMusicSettings;
+  countdown?: StageCountdown;
   join: {
     joinMode: EventSettings['joinMode'];
     allowSelfRegistration: boolean;
@@ -182,7 +204,7 @@ export interface LiveSnapshot {
 
 export interface PlayerSummary {
   participant: Participant;
-  view: ViewKey;
+  view: PlayerViewKey;
   shake: {
     score: number;
     rank: number | null;

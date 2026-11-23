@@ -3,6 +3,7 @@ import test from 'node:test'
 import type { EventSettings } from '../../shared/types.ts'
 import {
   createParticipant,
+  defaultSettings,
   getQuestions,
   getSettings,
   openDb,
@@ -17,10 +18,13 @@ import {
   finishRedPacket,
   finishShake,
   getView,
+  getStageCountdown,
+  setView,
   startQuiz,
   startRedPacket,
   startShake,
-  submitShakeBatch
+  submitShakeBatch,
+  updateStageCountdown
 } from '../state.ts'
 
 function createPeople(count: number) {
@@ -39,6 +43,53 @@ function createPeople(count: number) {
   }
   return { db, ids }
 }
+
+test('background music defaults for old settings and is sent only to the screen snapshot', () => {
+  const db = openDb(':memory:')
+  try {
+    const { backgroundMusic, ...legacySettings } = defaultSettings
+    db.prepare("UPDATE settings SET value = ? WHERE key = 'event'").run(JSON.stringify(legacySettings))
+    assert.deepEqual(getSettings(db).backgroundMusic, backgroundMusic)
+    assert.equal(backgroundMusic.enabled, false)
+
+    const music = { enabled: true, url: 'https://example.com/gala.mp3', volume: 65, loop: false }
+    saveSettings(db, { ...legacySettings, backgroundMusic: music })
+    const screen = buildSnapshot(db)
+    assert.deepEqual(screen.backgroundMusic, music)
+    assert.equal(compactPlayerSnapshot(screen).backgroundMusic, undefined)
+    assert.throws(() => saveSettings(db, { ...legacySettings, backgroundMusic: { ...music, url: '' } }))
+    assert.throws(() => saveSettings(db, { ...legacySettings, backgroundMusic: { ...music, volume: 101 } }))
+    assert.throws(() => saveSettings(db, { ...legacySettings, backgroundMusic: { ...music, url: '//example.com/gala.mp3' } }))
+  } finally {
+    db.close()
+  }
+})
+
+test('stage countdown switches only the screen and keeps its deadline until reset', () => {
+  const { db } = createPeople(0)
+  try {
+    assert.deepEqual(getStageCountdown(db), { durationSec: 30 })
+    assert.throws(() => updateStageCountdown(db, { action: 'start', durationSec: 0 }))
+    updateStageCountdown(db, { action: 'preview', durationSec: 15 })
+    assert.equal(getView(db), 'countdown')
+    assert.deepEqual(getStageCountdown(db), { durationSec: 15 })
+
+    const start = Date.now()
+    updateStageCountdown(db, { action: 'start', durationSec: 15 }, start)
+    assert.throws(() => updateStageCountdown(db, { action: 'start', durationSec: 30 }, start + 1000))
+    const snapshot = buildSnapshot(db)
+    assert.deepEqual(snapshot.countdown, { durationSec: 15, endsAt: start + 15_000 })
+    assert.equal(compactPlayerSnapshot(snapshot).countdown, undefined)
+    assert.equal(compactPlayerSnapshot(snapshot).view, 'lobby')
+
+    setView(db, 'quiz')
+    updateStageCountdown(db, { action: 'reset' })
+    assert.equal(getView(db), 'quiz')
+    assert.deepEqual(getStageCountdown(db), { durationSec: 15 })
+  } finally {
+    db.close()
+  }
+})
 
 test('game flow persists winners and never duplicates a lottery winner', async () => {
   const { db, ids } = createPeople(8)

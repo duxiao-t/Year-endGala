@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import Database from 'better-sqlite3'
 import { z } from 'zod'
+import { BACKGROUND_MUSIC_PATH } from '../shared/types.ts'
 import type {
   EventSettings,
   Participant,
@@ -21,6 +22,7 @@ export const defaultSettings: EventSettings = {
   eligibilityPolicy: 'independent',
   displayNameMode: 'masked',
   drawVisualCards: 160,
+  backgroundMusic: { enabled: false, url: '', volume: 35, loop: true },
   shake: {
     durationSec: 30,
     winners: 10,
@@ -50,6 +52,20 @@ export const defaultSettings: EventSettings = {
   ]
 }
 
+function isBackgroundMusicUrl(value: string): boolean {
+  if (!value) return true
+  if (value.startsWith(BACKGROUND_MUSIC_PATH)) {
+    return /^[a-f0-9]{64}\.mp3$/.test(value.slice(BACKGROUND_MUSIC_PATH.length))
+  }
+  if (!/^https?:\/\//i.test(value)) return false
+  try {
+    const url = new URL(value)
+    return Boolean(url.hostname) && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
 const settingsSchema = z.object({
   eventName: z.string().min(1).max(80),
   company: z.string().min(1).max(80),
@@ -64,6 +80,12 @@ const settingsSchema = z.object({
   ]),
   displayNameMode: z.enum(['masked', 'full']),
   drawVisualCards: z.number().int().min(40).max(300),
+  backgroundMusic: z.object({
+    enabled: z.boolean(),
+    url: z.string().trim().max(2048).refine(isBackgroundMusicUrl, '请输入可直接播放的 HTTP(S) 音频链接，或上传 MP3'),
+    volume: z.number().int().min(0).max(100),
+    loop: z.boolean()
+  }).refine(music => !music.enabled || music.url !== '', { message: '开启背景音乐前请先设置音源' }),
   shake: z.object({
     durationSec: z.number().int().min(5).max(300),
     winners: z.number().int().min(1).max(200),
@@ -275,6 +297,7 @@ export function getSettings(db: Db): EventSettings {
   const settings = settingsSchema.parse({
     ...defaultSettings,
     ...parsed,
+    backgroundMusic: { ...defaultSettings.backgroundMusic, ...(parsed as Partial<EventSettings>).backgroundMusic },
     shake: { ...defaultSettings.shake, ...(parsed as Partial<EventSettings>).shake },
     redpacket: {
       ...defaultSettings.redpacket,

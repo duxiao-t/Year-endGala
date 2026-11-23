@@ -6,6 +6,8 @@ import { api } from '../api'
 import { useLive } from '../live'
 import { fen, useCountdown } from '../utils'
 import LotteryDisplay from '../components/LotteryDisplay.vue'
+import BackgroundMusic from '../components/BackgroundMusic.vue'
+import StageCountdown from '../components/StageCountdown.vue'
 
 const { snapshot, connected, lastError, connectLive, disconnectLive } = useLive()
 const token = ref(new URLSearchParams(window.location.search).get('token') || localStorage.getItem('gala_screen_token') || '')
@@ -75,12 +77,12 @@ async function loadScreen() {
   error.value = ''
   try {
     const value = await api.screenSnapshot(token.value)
+    snapshot.value = value
     authorized.value = true
     if (!connectedOnce) {
       connectLive({ screenToken: token.value })
       connectedOnce = true
     }
-    if (!snapshot.value) snapshot.value = value
     if (snapshotTimer) window.clearInterval(snapshotTimer)
     snapshotTimer = window.setInterval(async () => {
       try {
@@ -125,8 +127,6 @@ function phaseLabel(phase: string) {
 
 <template>
   <main class="screen-shell">
-    <div class="screen-grain" aria-hidden="true"></div>
-
     <header class="screen-header">
       <div class="brand">
         <div class="brand-mark">G</div>
@@ -139,6 +139,10 @@ function phaseLabel(phase: string) {
         <span class="eyebrow">{{ snapshot?.eventName || '年会互动现场' }}</span>
       </div>
       <div class="row">
+        <BackgroundMusic
+          v-if="authorized && snapshot?.backgroundMusic?.enabled"
+          :music="snapshot.backgroundMusic"
+        />
         <span class="tag">
           <span class="live-dot" :class="{ offline: !connected }"></span>
           {{ connected ? 'LIVE' : 'SYNCING' }}
@@ -350,7 +354,11 @@ function phaseLabel(phase: string) {
           </div>
         </section>
 
-        <section v-else key="lottery" class="screen-view lottery-view">
+        <section v-else-if="view === 'countdown' && snapshot.countdown" key="countdown" class="screen-view">
+          <StageCountdown :countdown="snapshot.countdown" :server-now="snapshot.now" :event-name="snapshot.eventName" />
+        </section>
+
+        <section v-else-if="view === 'lottery'" key="lottery" class="screen-view lottery-view">
           <LotteryDisplay :snapshot="snapshot" />
         </section>
       </Transition>
@@ -367,25 +375,42 @@ function phaseLabel(phase: string) {
 <style>
 .screen-shell {
   position: relative;
+  isolation: isolate;
   display: flex;
   min-height: 100vh;
   flex-direction: column;
   overflow: hidden;
   background:
-    radial-gradient(circle at 12% 0%, rgba(45, 212, 191, 0.11), transparent 35%),
-    radial-gradient(circle at 86% 8%, rgba(247, 201, 72, 0.1), transparent 28%),
-    linear-gradient(145deg, #06101d, #081c2c 55%, #071421);
+    radial-gradient(ellipse at 50% -18%, rgba(255, 172, 96, 0.26), transparent 56%),
+    linear-gradient(180deg, rgba(44, 8, 19, 0.12), transparent 65%, rgba(26, 6, 13, 0.32));
 }
 
-.screen-grain {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
+.screen-shell::before,
+.screen-shell::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: -15vh -25vw auto;
+  height: 115vh;
   pointer-events: none;
-  opacity: 0.3;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.5) 0.6px, transparent 0.7px);
-  background-size: 46px 46px;
-  mask-image: linear-gradient(to bottom, #000, transparent 90%);
+  mask-image: linear-gradient(#000 18%, transparent 95%);
+}
+
+.screen-shell::before {
+  transform-origin: 29% 0;
+  background: conic-gradient(from 143deg at 29% 0, transparent 0 8deg, rgba(255, 186, 111, 0.34) 21deg, rgba(255, 212, 154, 0.2) 26deg, transparent 40deg);
+  animation: gala-stage-spotlight 12s ease-in-out infinite alternate;
+}
+
+.screen-shell::after {
+  transform-origin: 76% 0;
+  background: conic-gradient(from 163deg at 76% 0, transparent 0 12deg, rgba(255, 185, 106, 0.26) 28deg, rgba(255, 217, 164, 0.17) 33deg, transparent 46deg);
+  animation: gala-stage-spotlight 15s -7s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes gala-stage-spotlight {
+  from { transform: rotate(-17deg); opacity: 0.74; }
+  to { transform: rotate(18deg); opacity: 1; }
 }
 
 .screen-header,
@@ -400,7 +425,7 @@ function phaseLabel(phase: string) {
 }
 
 .screen-header {
-  border-bottom: 1px solid rgba(148, 211, 219, 0.1);
+  border-bottom: 1px solid var(--line);
 }
 
 .screen-header-center {
@@ -458,10 +483,10 @@ function phaseLabel(phase: string) {
   width: 74px;
   height: 74px;
   margin: 0 auto 22px;
-  border: 1px solid rgba(45, 212, 191, 0.35);
+  border: 1px solid var(--line);
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(45, 212, 191, 0.4), transparent 66%);
-  box-shadow: 0 0 70px rgba(45, 212, 191, 0.28);
+  background: radial-gradient(circle, rgba(246, 206, 131, 0.45), transparent 66%);
+  box-shadow: 0 0 70px rgba(246, 206, 131, 0.25);
   animation: pulse 1.8s infinite;
 }
 
@@ -541,7 +566,7 @@ function phaseLabel(phase: string) {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(5, 18, 30, 0.45);
+  background: var(--surface);
 }
 
 .game-mini > span {
@@ -642,14 +667,14 @@ function phaseLabel(phase: string) {
   align-items: center;
   min-height: 45px;
   padding: 7px 14px;
-  border: 1px solid rgba(148, 211, 219, 0.1);
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: rgba(5, 18, 30, 0.38);
+  background: var(--surface);
 }
 
 .screen-rank-row.first {
   border-color: rgba(247, 201, 72, 0.35);
-  background: linear-gradient(90deg, rgba(247, 201, 72, 0.09), rgba(5, 18, 30, 0.38));
+  background: linear-gradient(90deg, rgba(247, 201, 72, 0.09), var(--surface));
 }
 
 .screen-rank {
@@ -847,7 +872,7 @@ function phaseLabel(phase: string) {
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 13px;
-  background: rgba(5, 18, 30, 0.45);
+  background: var(--surface);
 }
 
 .screen-option > span {

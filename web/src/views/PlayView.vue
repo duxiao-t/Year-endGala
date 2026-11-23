@@ -23,6 +23,7 @@ const view = computed(() => snapshot.value?.view || player.value?.view || 'lobby
 const currentGameLabel = computed(() => {
   return {
     lobby: '互动大厅',
+    countdown: '互动大厅',
     shake: '手机摇一摇',
     redpacket: '红包雨',
     quiz: '现场答题',
