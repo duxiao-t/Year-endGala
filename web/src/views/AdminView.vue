@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { DEFAULT_COUNTDOWN_SECONDS, MAX_BACKGROUND_MUSIC_BYTES, MAX_COUNTDOWN_SECONDS } from '@shared/types'
 import type {
   AdminClaimRow,
   AdminOverview,
@@ -8,7 +9,7 @@ import type {
   Question
 } from '@shared/types'
 import { api, exportWorkbook, fileToBase64 } from '../api'
-import { copyText, dateTime, fen } from '../utils'
+import { copyText, dateTime, fen, formatCountdown, useCountdown } from '../utils'
 
 type AdminTab = 'control' | 'participants' | 'settings' | 'questions' | 'results'
 
@@ -28,6 +29,8 @@ const claimSearch = ref('')
 const screenToken = ref(localStorage.getItem('gala_screen_token') || '')
 const refreshing = ref(false)
 const importedBusy = ref(false)
+const musicUploading = ref(false)
+const settingsSaving = ref(false)
 const isDev = import.meta.env.DEV
 let pollTimer: number | undefined
 let settingsLoaded = false
@@ -56,6 +59,10 @@ const draft = reactive({
   eligibilityPolicy: 'independent' as EventSettings['eligibilityPolicy'],
   displayNameMode: 'masked' as EventSettings['displayNameMode'],
   drawVisualCards: 160,
+  musicEnabled: false,
+  musicUrl: '',
+  musicVolume: 35,
+  musicLoop: true,
   shakeDuration: 30,
   shakeWinners: 10,
   shakePrizeName: '摇一摇好礼',
@@ -84,6 +91,14 @@ const tabItems: Array<{ key: AdminTab; label: string; icon: string }> = [
 ]
 
 const currentView = computed(() => overview.value?.snapshot.view || 'lobby')
+const countdown = computed(() => overview.value?.snapshot.countdown)
+const countdownDuration = ref<number | string>(DEFAULT_COUNTDOWN_SECONDS)
+const countdownBusy = ref(false)
+const countdownSeconds = useCountdown(() => countdown.value?.endsAt, () => overview.value?.snapshot.now)
+const countdownRunning = computed(() => currentView.value === 'countdown' && countdownSeconds.value > 0)
+watch(() => countdown.value?.durationSec, seconds => {
+  if (seconds !== undefined) countdownDuration.value = seconds
+})
 const phase = computed(() => ({
   shake: overview.value?.snapshot.shake.phase || 'idle',
   redpacket: overview.value?.snapshot.redpacket.phase || 'idle',
@@ -104,10 +119,12 @@ const screenUrl = computed(() => {
 onMounted(async () => {
   await refresh()
   pollTimer = window.setInterval(async () => {
-    if (!authenticated.value) return
+    if (!authenticated.value || countdownBusy.value) return
     try {
       const value = await api.adminOverview()
-      overview.value = value
+      if (!countdownBusy.value && value.snapshot.now >= (overview.value?.snapshot.now ?? 0)) {
+        overview.value = value
+      }
     } catch {
       // Keep the last known control state during a transient network error.
     }
@@ -149,6 +166,10 @@ function applySettings(settings: EventSettings) {
   draft.eligibilityPolicy = settings.eligibilityPolicy
   draft.displayNameMode = settings.displayNameMode
   draft.drawVisualCards = settings.drawVisualCards
+  draft.musicEnabled = settings.backgroundMusic.enabled
+  draft.musicUrl = settings.backgroundMusic.url
+  draft.musicVolume = settings.backgroundMusic.volume
+  draft.musicLoop = settings.backgroundMusic.loop
   draft.shakeDuration = settings.shake.durationSec
   draft.shakeWinners = settings.shake.winners
   draft.shakePrizeName = settings.shake.prizeName
@@ -182,6 +203,12 @@ function settingsPayload(): EventSettings {
     eligibilityPolicy: draft.eligibilityPolicy,
     displayNameMode: draft.displayNameMode,
     drawVisualCards: Number(draft.drawVisualCards),
+    backgroundMusic: {
+      enabled: draft.musicEnabled,
+      url: draft.musicUrl.trim(),
+      volume: Number(draft.musicVolume),
+      loop: draft.musicLoop
+    },
     shake: {
       durationSec: Number(draft.shakeDuration),
       winners: Number(draft.shakeWinners),
@@ -236,13 +263,38 @@ function notify(text: string, error = false) {
 }
 
 async function saveSettings() {
+  if (musicUploading.value || settingsSaving.value) return
+  if (draft.musicEnabled && !draft.musicUrl.trim()) return notify('请先上传 MP3 或填写音频链接', true)
+  settingsSaving.value = true
   try {
-    const settings = settingsPayload()
-    await api.updateSettings(settings)
+    const saved = await api.updateSettings(settingsPayload())
+    applySettings(saved)
     await refresh()
     notify('规则已保存')
   } catch (error) {
     notify(error instanceof Error ? error.message : '保存失败', true)
+  } finally {
+    settingsSaving.value = false
+  }
+}
+
+async function uploadMusic(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || musicUploading.value || settingsSaving.value) return
+  if (!/\.mp3$/i.test(file.name)) return notify('请选择 MP3 文件', true)
+  if (file.size > MAX_BACKGROUND_MUSIC_BYTES) return notify('MP3 文件不能超过 20 MB', true)
+
+  musicUploading.value = true
+  try {
+    const { url } = await api.uploadBackgroundMusic(file)
+    draft.musicUrl = url
+    notify('上传成功，保存配置后同步到大屏')
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '音频上传失败', true)
+  } finally {
+    musicUploading.value = false
   }
 }
 
@@ -253,6 +305,26 @@ async function switchView(view: string) {
     notify(`已切换到 ${view === 'lobby' ? '互动大厅' : view}`)
   } catch (error) {
     notify(error instanceof Error ? error.message : '切换失败', true)
+  }
+}
+
+async function controlCountdown(action: 'preview' | 'start' | 'reset') {
+  if (countdownBusy.value) return
+  const seconds = Number(countdownDuration.value)
+  if (action !== 'reset' && (!Number.isInteger(seconds) || seconds < 1 || seconds > MAX_COUNTDOWN_SECONDS)) {
+    return notify(`请输入 1–${MAX_COUNTDOWN_SECONDS} 的整数秒数`, true)
+  }
+  countdownBusy.value = true
+  try {
+    overview.value = await api.stageCountdown(action === 'reset' ? { action } : { action, durationSec: seconds })
+    if (action === 'reset' && overview.value.snapshot.countdown) {
+      countdownDuration.value = overview.value.snapshot.countdown.durationSec
+    }
+    notify({ preview: '已切换大屏倒计时', start: '倒计时已开始', reset: '倒计时已重置' }[action])
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '倒计时操作失败', true)
+  } finally {
+    countdownBusy.value = false
   }
 }
 
@@ -466,7 +538,7 @@ async function openTab(next: AdminTab) {
 }
 
 function gameName(game: string) {
-  return { lottery: '抽奖', shake: '摇一摇', redpacket: '红包雨', quiz: '答题' }[game] || game
+  return { lottery: '抽奖', shake: '摇一摇', redpacket: '红包雨', quiz: '答题', countdown: '开场倒计时' }[game] || game
 }
 </script>
 
@@ -594,6 +666,23 @@ function gameName(game: string) {
           </section>
 
           <div class="grid grid-2" style="margin-bottom: 14px">
+            <section class="panel pad" style="grid-column: 1 / -1">
+              <div class="row between wrap">
+                <h2 style="margin: 0; font-size: 20px">开场倒计时</h2>
+                <span class="tag gold">
+                  {{ countdownRunning ? `进行中 · ${formatCountdown(countdownSeconds)}` : currentView === 'countdown' && countdown?.endsAt ? '已开场' : '待开始' }}
+                </span>
+              </div>
+              <form class="row wrap" style="align-items: end; margin-top: 14px" @submit.prevent="controlCountdown('start')">
+                <label class="field" style="width: 140px">
+                  <span class="label">倒计时（秒）</span>
+                  <input v-model.number="countdownDuration" class="input" type="number" min="1" :max="MAX_COUNTDOWN_SECONDS" required :disabled="countdownBusy || countdownRunning" />
+                </label>
+                <button class="btn" type="button" :disabled="countdownBusy || countdownRunning" @click="controlCountdown('preview')">大屏预览</button>
+                <button class="btn btn-primary" type="submit" :disabled="countdownBusy || countdownRunning">开始倒计时</button>
+                <button class="btn" type="button" :disabled="countdownBusy || !countdown?.endsAt" @click="controlCountdown('reset')">重置倒计时</button>
+              </form>
+            </section>
             <section class="panel pad">
               <p class="eyebrow">SHAKE CONTROL</p>
               <h3 style="margin: 6px 0 12px">摇一摇</h3>
@@ -796,6 +885,28 @@ function gameName(game: string) {
             </div>
 
             <div class="divider"></div>
+            <h3 class="eyebrow">大屏背景音乐</h3>
+            <p class="small muted">上传 MP3（最大 20 MB），或填写可直接播放的音频链接。保存后同步到大屏。</p>
+            <div class="grid grid-2" style="margin-top: 10px">
+              <label class="field">
+                <span class="label">音频链接</span>
+                <input v-model.trim="draft.musicUrl" class="input" maxlength="2048" placeholder="https://example.com/music.mp3" :disabled="musicUploading || settingsSaving" />
+              </label>
+              <label class="field">
+                <span class="label">{{ musicUploading ? '正在上传…' : '上传 MP3' }}</span>
+                <input class="input" type="file" accept=".mp3,audio/mpeg" :disabled="musicUploading || settingsSaving" @change="uploadMusic" />
+              </label>
+              <div class="row wrap">
+                <label class="tag"><input v-model="draft.musicEnabled" type="checkbox" /> 启用背景音乐</label>
+                <label class="tag"><input v-model="draft.musicLoop" type="checkbox" /> 循环播放</label>
+              </div>
+              <label class="field">
+                <span class="label">音量 {{ draft.musicVolume }}%</span>
+                <input v-model.number="draft.musicVolume" type="range" min="0" max="100" style="width: 100%; accent-color: var(--gold)" />
+              </label>
+            </div>
+
+            <div class="divider"></div>
             <p class="eyebrow">玩法参数</p>
             <div class="grid grid-3" style="margin-top: 10px">
               <label class="field"><span class="label">摇一摇时长（秒）</span><input v-model.number="draft.shakeDuration" class="input" type="number" /></label>
@@ -827,7 +938,7 @@ function gameName(game: string) {
             <p class="small muted">JSON 数组，每项：name、count、each、可选 image。count 是奖项总数，each 是每次抽取人数。</p>
             <textarea v-model="draft.lotteryPrizesJson" class="textarea" rows="9" spellcheck="false"></textarea>
             <div class="row" style="justify-content: flex-end; margin-top: 12px">
-              <button class="btn btn-primary" @click="saveSettings">保存全部配置</button>
+              <button class="btn btn-primary" :disabled="musicUploading || settingsSaving" @click="saveSettings">保存全部配置</button>
             </div>
           </section>
         </template>

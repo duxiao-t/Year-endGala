@@ -252,8 +252,8 @@ function winnerLabel(winner: Winner) {
   justify-content: space-between;
   gap: 24px;
   padding: 42px 34px;
-  border-right: 1px solid rgba(148, 211, 219, 0.1);
-  background: linear-gradient(90deg, rgba(5, 17, 29, 0.9), rgba(5, 17, 29, 0.2));
+  border-right: 1px solid var(--line);
+  background: linear-gradient(90deg, var(--panel-deep), transparent);
 }
 
 .lottery-prizes .screen-display em {
@@ -272,9 +272,9 @@ function winnerLabel(winner: Winner) {
   gap: 10px;
   align-items: center;
   padding: 12px;
-  border: 1px solid rgba(148, 211, 219, 0.12);
+  border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(5, 18, 30, 0.4);
+  background: var(--surface);
 }
 
 .prize-index {
@@ -334,8 +334,8 @@ function winnerLabel(winner: Winner) {
   transform: translate(-50%, -50%);
   border: 1px solid rgba(45, 212, 191, 0.15);
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(45, 212, 191, 0.1), transparent 58%);
-  box-shadow: 0 0 140px rgba(45, 212, 191, 0.12);
+  background: radial-gradient(circle, rgba(246, 206, 131, 0.17), transparent 58%);
+  box-shadow: 0 0 140px rgba(246, 206, 131, 0.16);
   pointer-events: none;
 }
 
@@ -364,9 +364,9 @@ function winnerLabel(winner: Winner) {
   padding: 8px 12px;
   border: 1px solid rgba(94, 234, 212, 0.38);
   border-radius: 10px;
-  color: #eafffa;
-  background: linear-gradient(135deg, rgba(13, 148, 136, 0.55), rgba(3, 32, 38, 0.72));
-  box-shadow: 0 0 24px rgba(45, 212, 191, 0.12);
+  color: var(--gold-light);
+  background: linear-gradient(135deg, rgba(130, 38, 55, 0.86), var(--panel-deep));
+  box-shadow: 0 0 24px rgba(246, 206, 131, 0.12);
   text-align: center;
   white-space: nowrap;
 }
@@ -391,7 +391,7 @@ function winnerLabel(winner: Winner) {
   display: grid;
   place-content: center;
   padding: 6%;
-  background: radial-gradient(circle, rgba(4, 20, 29, 0.88), rgba(4, 14, 24, 0.94));
+  background: radial-gradient(circle, var(--panel), var(--panel-deep));
   text-align: center;
   animation: fadeIn 0.5s ease both;
 }
@@ -424,7 +424,7 @@ function winnerLabel(winner: Winner) {
   padding: 14px 20px;
   border: 1px solid rgba(247, 201, 72, 0.36);
   border-radius: 14px;
-  background: linear-gradient(145deg, rgba(86, 64, 16, 0.56), rgba(7, 26, 38, 0.75));
+  background: linear-gradient(145deg, rgba(86, 64, 16, 0.56), var(--panel-deep));
   box-shadow: 0 0 40px rgba(247, 201, 72, 0.08);
   animation: winnerIn 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }

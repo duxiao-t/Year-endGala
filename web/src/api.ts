@@ -62,6 +62,12 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(settings)
     }),
+  uploadBackgroundMusic: (file: File) =>
+    request<{ url: string }>('/api/admin/music', {
+      method: 'POST',
+      headers: { 'Content-Type': 'audio/mpeg' },
+      body: file
+    }),
   participants: (query = '', limit = 100, offset = 0) =>
     request<{ rows: Participant[]; total: number }>(
       `/api/admin/participants?query=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`
@@ -121,6 +127,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ view })
     }),
+  stageCountdown: (command: { action: 'preview' | 'start'; durationSec: number } | { action: 'reset' }) =>
+    request<AdminOverview>('/api/admin/countdown', { method: 'POST', body: JSON.stringify(command) }),
   action: (game: string, action: string, confirm?: string) =>
     request<{ ok: boolean; overview: AdminOverview }>(`/api/admin/games/${game}/action`, {
       method: 'POST',

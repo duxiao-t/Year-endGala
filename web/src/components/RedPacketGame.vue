@@ -174,10 +174,10 @@ function drawBackdrop(context: CanvasRenderingContext2D, now: number) {
     canvasHeight * 0.8
   )
   gradient.addColorStop(0, 'rgba(86, 22, 31, 0.55)')
-  gradient.addColorStop(1, 'rgba(4, 17, 29, 0.05)')
+  gradient.addColorStop(1, 'rgba(31, 8, 16, 0.05)')
   context.fillStyle = gradient
   context.fillRect(0, 0, canvasWidth, canvasHeight)
-  context.fillStyle = 'rgba(255,255,255,.12)'
+  context.fillStyle = 'rgba(255, 216, 149, 0.22)'
   for (let index = 0; index < 28; index += 1) {
     const x = ((index * 73 + now * 0.01) % (canvasWidth + 40)) - 20
     const y = (index * 47) % (canvasHeight + 40)
